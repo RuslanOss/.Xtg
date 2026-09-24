@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Xtg — Telegram-bot that tracks X/Y coordinates in real time and replies with a plot."""
+"""Xtg — Telegram-bot: X/Y calculations plus square root, text-only replies."""
 
 from __future__ import annotations
 
-import io
 import logging
 import math
 import os
@@ -13,7 +12,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from dotenv import load_dotenv
-from telegram import InputFile, Update
+from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
@@ -47,6 +46,16 @@ POINT_RE = re.compile(
     re.IGNORECASE | re.VERBOSE,
 )
 
+NUMBER_RE = re.compile(
+    r"""
+    ^\s*
+    (?:sqrt|sqrt\s*of|\u221a)?\s*
+    ([+-]?\d+(?:[.,]\d+)?)
+    \s*$
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
 
 @dataclass
 class Point:
@@ -71,8 +80,7 @@ class Store:
         return self._tracks.get(chat_id, [])
 
     def clear(self, chat_id: int) -> int:
-        n = len(self._tracks.pop(chat_id, []))
-        return n
+        return len(self._tracks.pop(chat_id, []))
 
 
 store = Store()
@@ -87,53 +95,37 @@ def parse_xy(text: str) -> Optional[tuple[float, float]]:
     return x, y
 
 
+def parse_number(text: str) -> Optional[float]:
+    m = NUMBER_RE.match(text.replace("\u00a0", " "))
+    if not m:
+        return None
+    return float(m.group(1).replace(",", "."))
+
+
 def dist(a: Point, b: Point) -> float:
     return math.hypot(b.x - a.x, b.y - a.y)
 
 
-def render_plot(points: list[Point]) -> bytes:
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    xs = [p.x for p in points]
-    ys = [p.y for p in points]
-
-    fig, ax = plt.subplots(figsize=(8, 6), dpi=140)
-    fig.patch.set_facecolor("#0f1419")
-    ax.set_facecolor("#15202b")
-
-    if len(points) == 1:
-        ax.scatter(xs, ys, s=90, c="#1d9bf0", zorder=3)
-    else:
-        ax.plot(xs, ys, color="#1d9bf0", linewidth=2, marker="o", markersize=5, zorder=2)
-        ax.scatter([xs[0]], [ys[0]], s=80, c="#00ba7c", zorder=3, label="start")
-        ax.scatter([xs[-1]], [ys[-1]], s=110, c="#f4212e", zorder=4, label="now")
-        ax.legend(facecolor="#15202b", edgecolor="#38444d", labelcolor="#e7e9ea")
-
-    ax.set_xlabel("X", color="#8b98a5")
-    ax.set_ylabel("Y", color="#8b98a5")
-    ax.set_title(f"Track · {len(points)} pts", color="#e7e9ea", pad=12)
-    ax.tick_params(colors="#8b98a5")
-    for spine in ax.spines.values():
-        spine.set_color("#38444d")
-    ax.grid(True, color="#38444d", linestyle="--", linewidth=0.6, alpha=0.7)
-    ax.set_aspect("equal", adjustable="datalim")
-    fig.tight_layout()
-
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", facecolor=fig.get_facecolor())
-    plt.close(fig)
-    buf.seek(0)
-    return buf.read()
+def fmt(n: float) -> str:
+    return f"{n:.6g}"
 
 
-def format_report(points: list[Point]) -> str:
+def sqrt_line(label: str, value: float) -> str:
+    if value < 0:
+        return f"√{label} — не определён (число < 0)"
+    return f"√{label} = <code>{fmt(math.sqrt(value))}</code>"
+
+
+def format_point_report(points: list[Point]) -> str:
     last = points[-1]
+    r = math.hypot(last.x, last.y)
     lines = [
-        f"<b>X</b> = <code>{last.x:.6g}</code>",
-        f"<b>Y</b> = <code>{last.y:.6g}</code>",
+        f"<b>X</b> = <code>{fmt(last.x)}</code>",
+        f"<b>Y</b> = <code>{fmt(last.y)}</code>",
+        f"|r| = <code>{fmt(r)}</code>",
+        sqrt_line("X", last.x),
+        sqrt_line("Y", last.y),
+        f"√(X²+Y²) = <code>{fmt(r)}</code>",
         f"source: {last.source} · pts: {len(points)}",
     ]
     if len(points) >= 2:
@@ -141,78 +133,66 @@ def format_report(points: list[Point]) -> str:
         dx = last.x - prev.x
         dy = last.y - prev.y
         step = dist(prev, last)
-        path = 0.0
-        for a, b in zip(points, points[1:]):
-            path += dist(a, b)
+        path = sum(dist(a, b) for a, b in zip(points, points[1:]))
         from_start = dist(points[0], last)
         lines += [
             f"ΔX = <code>{dx:+.6g}</code> · ΔY = <code>{dy:+.6g}</code>",
-            f"step = <code>{step:.6g}</code>",
-            f"path = <code>{path:.6g}</code> · from start = <code>{from_start:.6g}</code>",
+            f"step = <code>{fmt(step)}</code> · √step = <code>{fmt(math.sqrt(step))}</code>",
+            f"path = <code>{fmt(path)}</code> · from start = <code>{fmt(from_start)}</code>",
         ]
     return "\n".join(lines)
 
 
-async def reply_with_plot(update: Update, points: list[Point]) -> None:
-    message = update.effective_message
-    if not message or not points:
-        return
-    png = render_plot(points)
-    await message.reply_photo(
-        photo=InputFile(io.BytesIO(png), filename="track.png"),
-        caption=format_report(points),
-        parse_mode=ParseMode.HTML,
-    )
+def format_sqrt_report(n: float) -> str:
+    lines = [f"число = <code>{fmt(n)}</code>", sqrt_line("n", n)]
+    if n >= 0:
+        root = math.sqrt(n)
+        lines.append(f"проверка: {fmt(root)}² = <code>{fmt(root * root)}</code>")
+    return "\n".join(lines)
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.effective_message.reply_text(
-        "Xtg — live X/Y tracker.\n\n"
-        "Send a point:\n"
-        "• <code>10 20</code> or <code>10,20</code>\n"
+    await update.effective_message.reply_html(
+        "Xtg — расчёт X/Y и квадратного корня.\n\n"
+        "Точка:\n"
+        "• <code>10 20</code> или <code>10,20</code>\n"
         "• <code>x=10 y=20</code>\n"
-        "• Telegram location (X=lon, Y=lat)\n"
-        "• live location — graph updates on every ping\n\n"
-        "/plot — current graph\n"
-        "/last — last point\n"
-        "/clear — reset track",
-        parse_mode=ParseMode.HTML,
+        "• геолокация Telegram (X=lon, Y=lat)\n"
+        "• live location — пересчёт на каждый пинг\n\n"
+        "Одно число — только корень: <code>81</code> → √81 = 9\n\n"
+        "/last — последняя точка\n"
+        "/clear — сброс трека"
     )
-
-
-async def cmd_plot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    points = store.get(update.effective_chat.id)
-    if not points:
-        await update.effective_message.reply_text("Track is empty. Send X Y first.")
-        return
-    await reply_with_plot(update, points)
 
 
 async def cmd_last(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     points = store.get(update.effective_chat.id)
     if not points:
-        await update.effective_message.reply_text("No points yet.")
+        await update.effective_message.reply_text("Точек пока нет.")
         return
-    await update.effective_message.reply_html(format_report(points))
+    await update.effective_message.reply_html(format_point_report(points))
 
 
 async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     n = store.clear(update.effective_chat.id)
-    await update.effective_message.reply_text(f"Cleared {n} point(s).")
+    await update.effective_message.reply_text(f"Сброшено точек: {n}.")
 
 
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (update.effective_message.text or "").strip()
     parsed = parse_xy(text)
-    if not parsed:
-        await update.effective_message.reply_text(
-            "Need two numbers: <code>12.5 -3</code> or share a location.",
-            parse_mode=ParseMode.HTML,
-        )
+    if parsed:
+        x, y = parsed
+        points = store.add(update.effective_chat.id, Point(x=x, y=y, source="text"))
+        await update.effective_message.reply_html(format_point_report(points))
         return
-    x, y = parsed
-    points = store.add(update.effective_chat.id, Point(x=x, y=y, source="text"))
-    await reply_with_plot(update, points)
+    n = parse_number(text)
+    if n is not None:
+        await update.effective_message.reply_html(format_sqrt_report(n))
+        return
+    await update.effective_message.reply_html(
+        "Нужны два числа <code>12.5 -3</code>, одно число для √, или геолокация."
+    )
 
 
 async def on_location(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -220,9 +200,11 @@ async def on_location(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if not loc:
         return
     source = "live" if loc.live_period else "geo"
-    point = Point(x=loc.longitude, y=loc.latitude, source=source)
-    points = store.add(update.effective_chat.id, point)
-    await reply_with_plot(update, points)
+    points = store.add(
+        update.effective_chat.id,
+        Point(x=loc.longitude, y=loc.latitude, source=source),
+    )
+    await update.effective_message.reply_html(format_point_report(points))
 
 
 async def on_live_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -230,14 +212,8 @@ async def on_live_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not msg or not msg.location:
         return
     loc = msg.location
-    point = Point(x=loc.longitude, y=loc.latitude, source="live")
-    points = store.add(msg.chat_id, point)
-    png = render_plot(points)
-    await msg.reply_photo(
-        photo=InputFile(io.BytesIO(png), filename="track.png"),
-        caption=format_report(points),
-        parse_mode=ParseMode.HTML,
-    )
+    points = store.add(msg.chat_id, Point(x=loc.longitude, y=loc.latitude, source="live"))
+    await msg.reply_html(format_point_report(points))
 
 
 def main() -> None:
@@ -246,12 +222,13 @@ def main() -> None:
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_start))
-    app.add_handler(CommandHandler("plot", cmd_plot))
     app.add_handler(CommandHandler("last", cmd_last))
     app.add_handler(CommandHandler("clear", cmd_clear))
     app.add_handler(MessageHandler(filters.LOCATION, on_location))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
-    app.add_handler(MessageHandler(filters.UpdateType.EDITED_MESSAGE & filters.LOCATION, on_live_edit))
+    app.add_handler(
+        MessageHandler(filters.UpdateType.EDITED_MESSAGE & filters.LOCATION, on_live_edit)
+    )
     logger.info("Xtg is running")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 

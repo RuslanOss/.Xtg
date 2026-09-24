@@ -1,21 +1,28 @@
 # .Xtg
 
-Telegram-bot that tracks **X / Y** in real time and replies with a plot.
+Telegram-bot: **X / Y calculations** and **square root**. Text replies only, no graphs.
 
 ## What it does
 
-- Accepts points as text: `10 20`, `10,20`, `x=10 y=20`
-- Accepts Telegram location: **X = longitude**, **Y = latitude**
-- Live location: every ping appends a point and sends an updated graph
-- Each reply: current X/Y, ΔX/ΔY, step, path length, PNG track
+- Point as text: `10 20`, `10,20`, `x=10 y=20`
+- Telegram location: **X = longitude**, **Y = latitude**
+- Live location: recalculates on every ping
+- Single number: square root only (`81` → √81 = 9)
+
+Each point reply:
+
+- X, Y, |r|
+- √X, √Y, √(X²+Y²)
+- ΔX / ΔY, step, √step, path, distance from start
+
+Negative values: real square root is reported as undefined.
 
 ## Commands
 
 | Command | Action |
 | --- | --- |
 | `/start` | help |
-| `/plot` | current graph |
-| `/last` | last point without a new image |
+| `/last` | last point |
 | `/clear` | reset the track |
 
 Tracks are stored in memory per chat (up to `MAX_POINTS`, default 500).
@@ -26,14 +33,11 @@ Tracks are stored in memory per chat (up to `MAX_POINTS`, default 500).
 python -m venv .venv
 source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-cp .env.example .env        # put the token from @BotFather
+cp .env.example .env        # token from @BotFather
 python bot.py
 ```
-
-Get a token from [@BotFather](https://t.me/BotFather), paste it into `.env` as `BOT_TOKEN`.
 
 ## Stack
 
 - Python 3.10+
 - [python-telegram-bot](https://github.com/python-telegram-bot/python-telegram-bot) 21
-- matplotlib (Agg) for PNG plots
